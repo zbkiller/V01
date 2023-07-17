@@ -279,15 +279,13 @@ class SpatialAttention(nn.Module):
 
 
 class CBAM(nn.Module):
-    """Convolutional Block Attention Module."""
-
+    # Convolutional Block Attention Module
     def __init__(self, c1, kernel_size=7):  # ch_in, kernels
         super().__init__()
         self.channel_attention = ChannelAttention(c1)
         self.spatial_attention = SpatialAttention(kernel_size)
 
     def forward(self, x):
-        """Applies the forward pass through C1 module."""
         return self.spatial_attention(self.channel_attention(x))
 
 
