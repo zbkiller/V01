@@ -633,7 +633,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
-                 BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3, GAM_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention, ResBlock_CBAM_Attention):
+                 BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3, SE_Attention, GAM_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention, ResBlock_CBAM_Attention):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
@@ -681,10 +681,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             #if c2 != nc:  # if not output
             #    #c2 = make_divisible(min(c2, max_channels) * width, 8)
             #args = [c1, c2, *args[1:]]
-        elif m is SE_Attention:
-            c1, c2 = ch[f], args[0]
-            if c2 != nc:
-                c2 = make_divisible(c2 * width, 8)
+        #elif m is SE_Attention:
+            #c1, c2 = ch[f], args[0]
+            #if c2 != nc:
+                #c2 = make_divisible(c2 * width, 8)
         elif m is ECA_Attention:
             c1, c2 = ch[f], args[0]
             if c2 != nc:
