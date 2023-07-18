@@ -16,7 +16,7 @@ os.system(f'onnxsim {f} {f} && open {f}')
 from .block import (C1, C2, C3, C3TR, DFL, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x, GhostBottleneck,
                     HGBlock, HGStem, Proto, RepC3)
 from .conv import (CBAM, ChannelAttention, Concat, Conv, Conv2, ConvTranspose, DWConv, DWConvTranspose2d, Focus,
-                   GhostConv, LightConv, RepConv, SpatialAttention, GAM_Attention, SE_Attention, ECA_Attention, Shuffle_Attention, EffectiveSE_Attention, ResBlock_CBAM_Attention, Triplet_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention)
+                   GhostConv, LightConv, RepConv, SpatialAttention, GAM_Attention, SE_Attention, SK_Attention, ECA_Attention, Shuffle_Attention, EffectiveSE_Attention, ResBlock_CBAM_Attention, Triplet_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention)
 from .head import Classify, Detect, Pose, RTDETRDecoder, Segment
 from .transformer import (AIFI, MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer, LayerNorm2d,
                           MLPBlock, MSDeformAttn, TransformerBlock, TransformerEncoderLayer, TransformerLayer)

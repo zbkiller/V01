@@ -15,7 +15,15 @@ from timm.layers.create_act import create_act_layer
 import torch.nn.functional as F
 from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.utils import _pair
+from functools import reduce
 
+"""
+from .layers import CloLayer
+from .patch_embedding import PatchEmbedding
+import torch
+import torch.nn as nn
+from typing import List
+"""
 __all__ = ('Conv', 'LightConv', 'DWConv', 'DWConvTranspose2d', 'ConvTranspose', 'Focus', 'GhostConv',
            'ChannelAttention', 'SpatialAttention', 'CBAM', 'Concat', 'RepConv')
 
@@ -376,7 +384,7 @@ class GAM_Attention(nn.Module):
         return out
 class SE_Attention(nn.Module):
 ###################### SENet     ####     start   by  AI&CV  ###############################
-    def __init__(self, channel=512,reduction=16):
+    def __init__(self, channel, reduction=16):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
@@ -779,3 +787,102 @@ class C2f_DSConv2D_Attention(nn.Module):
 
 
 ###################### DSConv  ####     END   by  AI&CV  ###############################
+"""class CloFormer(nn.Module):
+
+    def __init__(self, in_chans, num_classes, embed_dims: List[int], depths: List[int],
+                 num_heads: List[int], group_splits: List[List[int]], kernel_sizes: List[List[int]],
+                 window_sizes: List[int], mlp_kernel_sizes: List[int], mlp_ratios: List[int],
+                 attn_drop=0., mlp_drop=0., qkv_bias=True, drop_path_rate=0.1, use_checkpoint=False):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_layers = len(depths)
+        self.mlp_ratios = mlp_ratios
+        self.patch_embed = PatchEmbedding(in_chans, embed_dims[0])
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            if i_layer != self.num_layers-1:
+                layer = CloLayer(depths[i_layer], embed_dims[i_layer], embed_dims[i_layer+1], num_heads[i_layer],
+                            group_splits[i_layer], kernel_sizes[i_layer], window_sizes[i_layer], 
+                            mlp_kernel_sizes[i_layer], mlp_ratios[i_layer], attn_drop, mlp_drop, 
+                            qkv_bias, dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])], True, use_checkpoint)
+            else:
+                layer = CloLayer(depths[i_layer], embed_dims[i_layer], embed_dims[i_layer], num_heads[i_layer],
+                            group_splits[i_layer], kernel_sizes[i_layer], window_sizes[i_layer], 
+                            mlp_kernel_sizes[i_layer], mlp_ratios[i_layer], attn_drop, mlp_drop, 
+                            qkv_bias, dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])], False, use_checkpoint)
+            self.layers.append(layer)
+
+        self.norm = nn.GroupNorm(1, embed_dims[-1])
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.head = nn.Linear(embed_dims[-1], num_classes) if num_classes>0 else nn.Identity()
+
+    def forward_feature(self, x):
+        '''
+        x: (b 3 h w)
+        '''
+        x = self.patch_embed(x)
+        for layer in self.layers:
+            x = layer(x)
+        x = self.avgpool(self.norm(x))
+        return x.flatten(1)
+
+    def forward(self, x):
+        x = self.forward_feature(x)
+        return self.head(x)
+"""
+class SK_Attention(nn.Module):
+    # 定义初始化函数，channel参数为输入的特征通道数，kernels参数为卷积核的大小列表，reduction参数为降维比例，group参数为卷积组数，L参数为维度
+    def __init__(self, channel=512,kernels=[1,3,5,7],reduction=16,group=1,L=32):
+        super().__init__()
+ 
+        # 定义d参数，为L和channel除以reduction中最大值
+        self.d=max(L,channel//reduction)
+ 
+        # 定义一个nn.ModuleList，用于存放卷积层 
+        #在输入图像上使用不同大小的卷积核卷积，获得多个不同尺寸的特征图；
+        self.convs=nn.ModuleList([])
+        for k in range(kernels):
+            self.convs.append(
+                nn.Sequential(OrderedDict([   # 定义一个nn.Sequential，包含一个OrderedDict
+                    ('conv',nn.Conv2d(channel,channel,kernel_size=k,padding=k//2,groups=group)),
+                    ('bn',nn.BatchNorm2d(channel)),
+                    ('relu',nn.ReLU())
+                ]))
+            )
+        self.fc=nn.Linear(channel,self.d)
+        self.fcs=nn.ModuleList([])
+        for i in range(len(kernels)):
+            self.fcs.append(nn.Linear(self.d,channel))
+        self.softmax=nn.Softmax(dim=0)
+
+    def forward(self, x):
+        bs, c, _, _ = x.size()
+        conv_outs=[]
+        ### split
+        for conv in self.convs:
+            conv_outs.append(conv(x))
+        feats=torch.stack(conv_outs,0)#k,bs,channel,h,w
+
+        ### fuse
+        U=sum(conv_outs) #bs,c,h,w
+
+        ### reduction channel
+        S=U.mean(-1).mean(-1) #bs,c
+        Z=self.fc(S) #bs,d
+
+        ### calculate attention weight
+        weights=[]
+        for fc in self.fcs:
+            weight=fc(Z)
+            weights.append(weight.view(bs,c,1,1)) #bs,channel
+        attention_weughts=torch.stack(weights,0)#k,bs,channel,1,1
+        attention_weughts=self.softmax(attention_weughts)#k,bs,channel,1,1
+
+        ### fuse
+        V=(attention_weughts*feats).sum(0)
+        return V
+
+
+    
