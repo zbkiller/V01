@@ -32,8 +32,7 @@ from ultralytics.yolo.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.yolo.utils.files import get_latest_run, increment_path
 from ultralytics.yolo.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle,
                                                 select_device, strip_optimizer)
-
-
+from ultralytics.yolo.cfg.sophia import SophiaG
 class BaseTrainer:
     """
     BaseTrainer
@@ -650,6 +649,8 @@ class BaseTrainer:
             optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
         elif name == 'SGD':
             optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
+        elif name == 'SophiaG':
+            optimizer = torch.optim.SophiaG(g[2], lr=lr, betas=(momentum, 0.999), rho=0.04, weight_decay=0.0)
         else:
             raise NotImplementedError(
                 f"Optimizer '{name}' not found in list of available optimizers "
