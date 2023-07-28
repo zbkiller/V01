@@ -650,7 +650,7 @@ class BaseTrainer:
         elif name == 'SGD':
             optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
         elif name == 'SophiaG':
-            optimizer = torch.optim.SophiaG(g[2], lr=lr, betas=(momentum, 0.999), rho=0.04, weight_decay=0.0)
+            optimizer = SophiaG(g[2], lr=lr, betas=(momentum, 0.999), rho=0.04, weight_decay=0.0)
         else:
             raise NotImplementedError(
                 f"Optimizer '{name}' not found in list of available optimizers "
