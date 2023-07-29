@@ -12,7 +12,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, CBAM, GAM_Attention, SE_Attention, SK_Attention, ECA_Attention,
                                     Shuffle_Attention, EffectiveSE_Attention, ResBlock_CBAM_Attention, Triplet_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention,
-                                    CoordAtt, ContextAggregation)
+                                    CoordAtt, ContextAggregation, CloFormer, ODConv_3rd, ConvNextBlock)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.yolo.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
@@ -637,7 +637,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
                  BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3,
                  SE_Attention, SK_Attention, GAM_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention, ResBlock_CBAM_Attention,
-                 CoordAtt, ContextAggregation):
+                 CoordAtt, ContextAggregation, CloFormer, ODConv_3rd, ConvNextBlock):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
