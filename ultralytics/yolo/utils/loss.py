@@ -65,7 +65,7 @@ class BboxLoss(nn.Module):
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         #iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, WIoU=True)
         #loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, DIoU=True, Focal=True)
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, DIoU=False, Focal=True)
         if type(iou) is tuple:
             loss_iou = ((1.0 - iou[0]) * iou[1].detach() * weight).sum() / target_scores_sum
         else:
