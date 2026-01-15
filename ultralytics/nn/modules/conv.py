@@ -1439,73 +1439,195 @@ class ODConv_3rd(nn.Module):
     def forward_fuse(self, x):
         return self.act(self.conv(x))
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class EnhancedGAM(nn.Module):
-    """Balanced improvement: Good performance with reasonable computation"""
-    def __init__(self, channels, reduction=8):
+    """Enhanced GAM for YOLOv8 - Balanced performance"""
+    def __init__(self, c1, c2=None, reduction=8, scales=[3, 5, 7]):
+        """
+        Args:
+            c1: input channels
+            c2: output channels (default: same as c1)
+            reduction: channel reduction ratio
+            scales: list of kernel sizes for multi-scale spatial attention
+        """
         super().__init__()
         
-        # Improved channel attention
+        # Handle YOLOv8 argument format
+        c2 = c2 or c1
+        
+        self.c1 = c1
+        self.c2 = c2
+        self.reduction = reduction
+        
+        # Channel adjustment if needed
+        if c1 != c2:
+            self.channel_adjust = nn.Conv2d(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+        
+        # Channel attention with GELU
+        mid_channels = max(c2 // reduction, 32)
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels//reduction, 1, bias=False),
-            nn.GELU(),  # Better than ReLU
-            nn.Conv2d(channels//reduction, channels, 1, bias=False),
+            nn.Conv2d(c2, mid_channels, 1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(mid_channels, c2, 1, bias=False),
             nn.Sigmoid()
         )
         
         # Multi-scale spatial attention
-        self.spatial_attention = nn.Sequential(
-            nn.Conv2d(channels, channels//4, 1),
-            MultiScaleConv(channels//4, scales=[3, 5, 7]),
-            nn.Conv2d(channels//4, 1, 1),
-            nn.Sigmoid()
-        )
+        self.spatial_attention = MultiScaleSpatialAttention(c2, scales=scales)
         
-        # Residual connection
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        # Residual weight (learnable)
+        self.alpha = nn.Parameter(torch.tensor(0.1))
         
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
     def forward(self, x):
         identity = x
+        
+        # Adjust channels if needed
+        x = self.channel_adjust(x)
         
         # Channel attention
         ca = self.channel_attention(x)
         x_ca = x * ca
         
-        # Spatial attention
+        # Multi-scale spatial attention
         sa = self.spatial_attention(x_ca)
-        x_sa = x_ca * sa
         
-        # Residual connection
-        return identity + self.residual_weight * x_sa
-class LightGAM(nn.Module):
-    """Ultra-lightweight for mobile/edge devices"""
-    def __init__(self, channels):
+        # Apply attention with residual connection
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        
+        return identity + self.alpha * (x_ca * sa)
+
+
+class MultiScaleSpatialAttention(nn.Module):
+    """Multi-scale spatial attention module"""
+    def __init__(self, channels, scales=[3, 5, 7]):
         super().__init__()
         
-        # Depthwise separable attention
-        self.depthwise_att = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1, groups=channels),
+        self.scales = scales
+        self.convs = nn.ModuleList()
+        
+        # Create convolution for each scale
+        for scale in scales:
+            padding = scale // 2
+            self.convs.append(
+                nn.Sequential(
+                    nn.Conv2d(channels, channels // 4, scale, padding=padding, groups=channels // 4),
+                    nn.BatchNorm2d(channels // 4),
+                    nn.GELU()
+                )
+            )
+        
+        # Fusion convolution
+        self.fusion = nn.Sequential(
+            nn.Conv2d(len(scales) * (channels // 4), channels // 4, 1),
+            nn.BatchNorm2d(channels // 4),
+            nn.GELU(),
+            nn.Conv2d(channels // 4, 1, 1),
             nn.Sigmoid()
         )
-        
-        # Pointwise attention
-        self.pointwise_att = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, max(channels//16, 8), 1),
-            nn.ReLU6(),  # Mobile-friendly
-            nn.Conv2d(max(channels//16, 8), channels, 1),
-            nn.Sigmoid()
-        )
-        
+    
     def forward(self, x):
-        # Depthwise attention
-        dw_att = self.depthwise_att(x)
+        features = []
+        for conv in self.convs:
+            features.append(conv(x))
         
-        # Pointwise attention
-        pw_att = self.pointwise_att(x)
+        # Concatenate multi-scale features
+        combined = torch.cat(features, dim=1)
         
-        # Combine
-        return x * dw_att * pw_att
+        # Generate spatial attention map
+        attention_map = self.fusion(combined)
+        
+        return attention_map
+class LightGAM(nn.Module):
+    """Lightweight GAM for YOLOv8 - Real-time performance"""
+    def __init__(self, c1, c2=None, reduction=16):
+        """
+        Args:
+            c1: input channels
+            c2: output channels (default: same as c1)
+            reduction: channel reduction ratio
+        """
+        super().__init__()
+        
+        # Handle YOLOv8 argument format
+        c2 = c2 or c1
+        
+        self.c1 = c1
+        self.c2 = c2
+        self.reduction = reduction
+        
+        # Channel adjustment if needed
+        if c1 != c2:
+            self.channel_adjust = nn.Conv2d(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+        
+        # Depthwise attention (spatial attention)
+        self.depthwise_attention = nn.Sequential(
+            nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
+            nn.Sigmoid()
+        )
+        
+        # Pointwise attention (channel attention)
+        # Use at least 8 channels for stability
+        pointwise_channels = max(c2 // reduction, 8)
+        self.pointwise_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, pointwise_channels, 1),
+            nn.ReLU6(),  # Mobile-friendly activation
+            nn.Conv2d(pointwise_channels, c2, 1),
+            nn.Sigmoid()
+        )
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                if m.groups == m.in_channels:  # Depthwise conv
+                    nn.init.normal_(m.weight, mean=0, std=0.01)
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        identity = x
+        
+        # Adjust channels if needed
+        x = self.channel_adjust(x)
+        
+        # Depthwise spatial attention
+        dw_att = self.depthwise_attention(x)
+        
+        # Pointwise channel attention
+        pw_att = self.pointwise_attention(x)
+        
+        # Apply both attentions
+        output = x * dw_att * pw_att
+        
+        # Ensure output channels match
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        
+        # Return with identity (residual connection)
+        return identity + output
 class HighPerfGAM(nn.Module):
     """High-Performance GAM for YOLOv8 with proper argument handling"""
     def __init__(self, in_channels, out_channels=None, reduction=8, num_heads=8):
