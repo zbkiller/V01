@@ -1507,37 +1507,94 @@ class LightGAM(nn.Module):
         # Combine
         return x * dw_att * pw_att
 class HighPerfGAM(nn.Module):
-    """Maximum accuracy improvement"""
-    def __init__(self, channels):
+    """High-Performance GAM for YOLOv8 with proper argument handling"""
+    def __init__(self, in_channels, out_channels=None, reduction=8, num_heads=8):
         super().__init__()
         
-        # Multi-head attention
-        self.multihead_att = MultiHeadAttention(channels, num_heads=8)
+        # Handle the case where only one argument is passed
+        if out_channels is None:
+            out_channels = in_channels
         
-        # Local-global fusion
-        self.local_conv = nn.Conv2d(channels, channels, 3, padding=1)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.reduction = reduction
+        self.num_heads = num_heads
         
-        # Dynamic feature recalibration
-        self.dynamic_weight = nn.Sequential(
-            nn.Linear(channels*2, channels),
+        # If input and output channels differ, add a conv layer
+        if in_channels != out_channels:
+            self.channel_adjust = nn.Conv2d(in_channels, out_channels, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+        
+        # Multi-Head Attention branch
+        self.mha = nn.MultiheadAttention(
+            embed_dim=out_channels,
+            num_heads=num_heads,
+            batch_first=True
+        )
+        
+        # Local convolution branch
+        self.local_conv = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, groups=out_channels),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU()
+        )
+        
+        # Dynamic weight generator
+        hidden_dim = max(out_channels // reduction, 32)
+        self.weight_generator = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(out_channels * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_channels),
             nn.Sigmoid()
         )
         
+        # Initialize weights
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+    
     def forward(self, x):
-        # Multi-head attention
-        att_feat = self.multihead_att(x)
+        identity = x
         
-        # Local features
+        # Adjust channels if needed
+        x = self.channel_adjust(x)
+        
+        B, C, H, W = x.shape
+        
+        # Multi-Head Attention branch
+        x_flat = x.flatten(2).transpose(1, 2)  # [B, N, C]
+        attn_output, _ = self.mha(x_flat, x_flat, x_flat)
+        global_feat = attn_output.transpose(1, 2).reshape(B, C, H, W)
+        
+        # Local convolution branch
         local_feat = self.local_conv(x)
         
-        # Global context
-        global_feat = self.global_pool(x).squeeze(-1).squeeze(-1)
-        local_vec = F.adaptive_avg_pool2d(local_feat, 1).squeeze(-1).squeeze(-1)
+        # Dynamic weight generation
+        combined = torch.cat([
+            F.adaptive_avg_pool2d(global_feat, 1),
+            F.adaptive_avg_pool2d(local_feat, 1)
+        ], dim=1)
+        weights = self.weight_generator(combined).view(B, C, 1, 1)
         
-        # Dynamic fusion
-        weight_input = torch.cat([global_feat, local_vec], dim=1)
-        weights = self.dynamic_weight(weight_input).unsqueeze(-1).unsqueeze(-1)
+        # Adaptive fusion
+        fused = weights * global_feat + (1 - weights) * local_feat
         
-        # Weighted combination
-        return x + weights * att_feat + (1 - weights) * local_feat
+        # Residual connection
+        if identity.shape[1] != self.out_channels:
+            identity = self.channel_adjust(identity)
+        
+        return identity + fused
