@@ -1439,3 +1439,105 @@ class ODConv_3rd(nn.Module):
     def forward_fuse(self, x):
         return self.act(self.conv(x))
 
+class EnhancedGAM(nn.Module):
+    """Balanced improvement: Good performance with reasonable computation"""
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        
+        # Improved channel attention
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels//reduction, 1, bias=False),
+            nn.GELU(),  # Better than ReLU
+            nn.Conv2d(channels//reduction, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        
+        # Multi-scale spatial attention
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(channels, channels//4, 1),
+            MultiScaleConv(channels//4, scales=[3, 5, 7]),
+            nn.Conv2d(channels//4, 1, 1),
+            nn.Sigmoid()
+        )
+        
+        # Residual connection
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+    def forward(self, x):
+        identity = x
+        
+        # Channel attention
+        ca = self.channel_attention(x)
+        x_ca = x * ca
+        
+        # Spatial attention
+        sa = self.spatial_attention(x_ca)
+        x_sa = x_ca * sa
+        
+        # Residual connection
+        return identity + self.residual_weight * x_sa
+class LightGAM(nn.Module):
+    """Ultra-lightweight for mobile/edge devices"""
+    def __init__(self, channels):
+        super().__init__()
+        
+        # Depthwise separable attention
+        self.depthwise_att = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels),
+            nn.Sigmoid()
+        )
+        
+        # Pointwise attention
+        self.pointwise_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, max(channels//16, 8), 1),
+            nn.ReLU6(),  # Mobile-friendly
+            nn.Conv2d(max(channels//16, 8), channels, 1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        # Depthwise attention
+        dw_att = self.depthwise_att(x)
+        
+        # Pointwise attention
+        pw_att = self.pointwise_att(x)
+        
+        # Combine
+        return x * dw_att * pw_att
+class HighPerfGAM(nn.Module):
+    """Maximum accuracy improvement"""
+    def __init__(self, channels):
+        super().__init__()
+        
+        # Multi-head attention
+        self.multihead_att = MultiHeadAttention(channels, num_heads=8)
+        
+        # Local-global fusion
+        self.local_conv = nn.Conv2d(channels, channels, 3, padding=1)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+        # Dynamic feature recalibration
+        self.dynamic_weight = nn.Sequential(
+            nn.Linear(channels*2, channels),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        # Multi-head attention
+        att_feat = self.multihead_att(x)
+        
+        # Local features
+        local_feat = self.local_conv(x)
+        
+        # Global context
+        global_feat = self.global_pool(x).squeeze(-1).squeeze(-1)
+        local_vec = F.adaptive_avg_pool2d(local_feat, 1).squeeze(-1).squeeze(-1)
+        
+        # Dynamic fusion
+        weight_input = torch.cat([global_feat, local_vec], dim=1)
+        weights = self.dynamic_weight(weight_input).unsqueeze(-1).unsqueeze(-1)
+        
+        # Weighted combination
+        return x + weights * att_feat + (1 - weights) * local_feat
