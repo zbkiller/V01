@@ -17,7 +17,7 @@ from torch.nn.modules.conv import _ConvNd
 from torch.nn.modules.utils import _pair
 from functools import reduce
 #from timm.models.layers import weight_init, DropPath
-from mmcv.cnn import ConvModule
+#from mmcv.cnn import ConvModule
 from mmengine.model import caffe2_xavier_init, constant_init
 from .layers import CloLayer
 from .patch_embedding import PatchEmbedding
@@ -944,7 +944,7 @@ class CoordAtt(nn.Module):
 
         return out
 
-    
+'''    
 class ContextAggregation(nn.Module):
     """
     Context Aggregation Block.
@@ -996,7 +996,7 @@ class ContextAggregation(nn.Module):
         y = self.m(y) * a
 
         return x + y
-
+'''
 """
 class activation(nn.ReLU):
     def __init__(self, dim, act_num=3, deploy=False):
