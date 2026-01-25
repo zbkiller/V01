@@ -1781,7 +1781,7 @@ class PerformerAttention(nn.Module):
         attention = torch.matmul(phi_q, k_t_v)  # [B, num_heads, N, head_dim]
         
         # Normalization
-        ones = torch.ones(B, self.num_heads, N, 1, device=x.device)
+        ones = torch.ones(B, self.num_heads, N, 1, dtype=x.dtype, device=x.device)
         norm = torch.matmul(phi_q, torch.matmul(phi_k.transpose(-1, -2), ones))
         attention = attention / (norm + 1e-8)
         
