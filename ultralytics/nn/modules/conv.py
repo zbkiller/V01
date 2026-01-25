@@ -1766,11 +1766,17 @@ class PerformerAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B, num_heads, N, head_dim]
         q, k, v = qkv[0], qkv[1], qkv[2]
         
-        # Apply random feature mapping
-        phi_q = self.phi(q)  # [B, num_heads, N, m_dim]
-        phi_k = self.phi(k)  # [B, num_heads, N, m_dim]
+        # Apply random feature mapping - FIXED
+        B, num_heads, N, head_dim = q.shape
         
-        # Linear attention computation
+        # Reshape for phi application
+        q_flat = q.reshape(B * num_heads, N, head_dim)
+        k_flat = k.reshape(B * num_heads, N, head_dim)
+        
+        phi_q = self.phi(q_flat).reshape(B, num_heads, N, -1)  # [B, num_heads, N, m_dim]
+        phi_k = self.phi(k_flat).reshape(B, num_heads, N, -1)  # [B, num_heads, N, m_dim]
+        
+        # Linear attention computation - FIXED
         k_t_v = torch.matmul(phi_k.transpose(-1, -2), v)  # [B, num_heads, m_dim, head_dim]
         attention = torch.matmul(phi_q, k_t_v)  # [B, num_heads, N, head_dim]
         
@@ -1913,14 +1919,18 @@ class ContextAwareGating(nn.Module):
         weights = self.gate_conv(features_concat)
         weights = F.softmax(weights, dim=1)
         
-        # Context modulation (broadcast context to match weights shape)
-        context_pooled = F.adaptive_avg_pool2d(context, 1)  # (B, C, 1, 1)
+        # Context modulation - FIXED
+        B, _, H, W = global_feat.shape
+        context_pooled = F.adaptive_avg_pool2d(context, (H, W))  # (B, C, H, W)
+        context_weight = context_pooled.mean(dim=1, keepdim=True)  # (B, 1, H, W)
+        weights = weights * context_weight  # (B, 3, H, W)
+        weights = F.softmax(weights, dim=1)  # Re-normalize
         weights = weights * context_pooled.mean(dim=1, keepdim=True)  # (B, 1, 1, 1)
-        
         # Weighted fusion
-        weights = weights.view(-1, 3, 1, 1, 1)
-        features_stacked = torch.stack([global_feat, channel_feat, local_feat], dim=1)
-        fused = (weights * features_stacked).sum(dim=1)
+        # Weighted fusion - FIXED
+        features_stacked = torch.stack([global_feat, channel_feat, local_feat], dim=1)  # (B, 3, C, H, W)
+        weights_expanded = weights.unsqueeze(2)  # (B, 3, 1, H, W)
+        fused = (weights_expanded * features_stacked).sum(dim=1)  # (B, C, H, W)
         
         # Residual connection
         return input_x + self.gamma * fused
