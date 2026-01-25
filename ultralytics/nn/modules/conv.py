@@ -22,6 +22,7 @@ from functools import reduce
 from .layers import CloLayer
 from .patch_embedding import PatchEmbedding
 from typing import List
+from typing import Optional, Tuple
 """
 from .layers import CloLayer
 from .patch_embedding import PatchEmbedding
@@ -1628,7 +1629,7 @@ class LightGAM(nn.Module):
         
         # Return with identity (residual connection)
         return identity + output
-class HighPerfGAM(nn.Module):
+class HighPerfGAM_old(nn.Module):
     """High-Performance GAM for YOLOv8 with proper argument handling"""
     def __init__(self, in_channels, out_channels=None, reduction=8, num_heads=8):
         super().__init__()
@@ -1719,4 +1720,334 @@ class HighPerfGAM(nn.Module):
         if identity.shape[1] != self.out_channels:
             identity = self.channel_adjust(identity)
         
-        return identity + fused
+        return identity + fused        
+
+
+# ==================== HighPerfGAM 完整实现 ====================
+
+class PerformerAttention(nn.Module):
+    """Linear-complexity global attention based on Performer architecture"""
+    
+    def __init__(self, dim: int, num_heads: int = 8, m_dim: int = 64):  # 减少m_dim到64以节省参数
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.m_dim = m_dim
+        
+        # Linear projections for Q, K, V
+        self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.to_out = nn.Linear(dim, dim)
+        
+        # Random feature maps for Performer
+        self.register_buffer('omega', torch.randn(m_dim, self.head_dim))
+        nn.init.orthogonal_(self.omega)
+        
+        # Learnable positional encoding (简化版本)
+        self.pos_encoding = nn.Parameter(torch.randn(1, 1, dim))
+        self.pos_gamma = nn.Parameter(torch.ones(1))
+        
+    def phi(self, x: torch.Tensor) -> torch.Tensor:
+        """Positive random feature mapping"""
+        x = x / math.sqrt(self.head_dim)
+        # 更高效的计算方式
+        x_transposed = x.transpose(-1, -2)  # [B, num_heads, head_dim, N]
+        omega_x = torch.matmul(self.omega, x_transposed)  # [B, num_heads, m_dim, N]
+        return torch.exp(omega_x) / math.sqrt(self.m_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        
+        # Add positional encoding
+        x = x + self.pos_gamma * self.pos_encoding[:, :N, :]
+        
+        # Project to Q, K, V
+        qkv = self.to_qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # [3, B, num_heads, N, head_dim]
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        # Apply random feature mapping
+        phi_q = self.phi(q)  # [B, num_heads, N, m_dim]
+        phi_k = self.phi(k)  # [B, num_heads, N, m_dim]
+        
+        # Linear attention computation
+        k_t_v = torch.matmul(phi_k.transpose(-1, -2), v)  # [B, num_heads, m_dim, head_dim]
+        attention = torch.matmul(phi_q, k_t_v)  # [B, num_heads, N, head_dim]
+        
+        # Normalization
+        ones = torch.ones(B, self.num_heads, N, 1, device=x.device)
+        norm = torch.matmul(phi_q, torch.matmul(phi_k.transpose(-1, -2), ones))
+        attention = attention / (norm + 1e-8)
+        
+        # Combine heads and project
+        attention = attention.transpose(1, 2).reshape(B, N, C)
+        return self.to_out(attention)
+
+
+class AdaptiveChannelAttention(nn.Module):
+    """Enhanced channel attention with multi-pooling"""
+    
+    def __init__(self, channels: int, reduction_ratio: int = 16, gamma: float = 0.1):
+        super().__init__()
+        self.channels = channels
+        self.reduction_ratio = reduction_ratio
+        self.gamma = nn.Parameter(torch.tensor(gamma))
+        
+        # Multi-pooling weights
+        self.pool_weights = nn.Parameter(torch.ones(3) / 3)
+        
+        # Multi-pooling
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        
+        # Shared MLP
+        hidden_dim = max(channels // reduction_ratio, 8)
+        self.mlp = nn.Sequential(
+            nn.Linear(channels, hidden_dim, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, channels, bias=False),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        
+        # Multi-pooling statistics
+        avg_pooled = self.avg_pool(x).view(B, C)
+        max_pooled = self.max_pool(x).view(B, C)
+        
+        # Global average pooling as third strategy
+        global_pooled = x.mean(dim=(2, 3)).view(B, C)
+        
+        # Weighted combination
+        weights = F.softmax(self.pool_weights, dim=0)
+        pooled = (
+            weights[0] * avg_pooled +
+            weights[1] * max_pooled +
+            weights[2] * global_pooled
+        )
+        
+        # Channel attention
+        attention = self.mlp(pooled).view(B, C, 1, 1)
+        
+        # Apply attention weights
+        return x * attention * self.gamma
+
+
+class LocalSpatialRefinement(nn.Module):
+    """Local spatial refinement with multi-scale depthwise convolutions"""
+    
+    def __init__(self, channels: int, expansion_ratio: float = 1.0):  # 减少扩展率
+        super().__init__()
+        self.channels = channels
+        expanded_channels = int(channels * expansion_ratio)
+        
+        # Multi-scale depthwise convolutions (简化版本)
+        self.dw_conv3 = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+        
+        self.dw_conv5 = nn.Sequential(
+            nn.Conv2d(channels, channels, 5, padding=2, groups=channels, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+        
+        # Dilated convolution
+        self.dilated_conv = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=2, dilation=2, groups=channels, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.GELU()
+        )
+        
+        # Fusion weights
+        self.fusion_weights = nn.Parameter(torch.ones(3) / 3)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Multi-scale feature extraction
+        out3 = self.dw_conv3(x)
+        out5 = self.dw_conv5(x)
+        out_dilated = self.dilated_conv(x)
+        
+        # Weighted fusion
+        weights = F.softmax(self.fusion_weights, dim=0)
+        fused = weights[0] * out3 + weights[1] * out5 + weights[2] * out_dilated
+        
+        return fused
+
+
+class ContextAwareGating(nn.Module):
+    """Context-aware gating for dynamic branch fusion"""
+    
+    def __init__(self, channels: int, reduction_ratio: int = 4):
+        super().__init__()
+        self.channels = channels
+        hidden_dim = channels // reduction_ratio
+        
+        # Global context extraction
+        self.context_extractor = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, hidden_dim, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+        
+        # Gating network (简化)
+        self.gate_conv = nn.Conv2d(channels * 3, 3, 1, bias=False)
+        
+        # Learnable scaling factor
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+        
+    def forward(self, features: Tuple[torch.Tensor, torch.Tensor, torch.Tensor], 
+                input_x: torch.Tensor) -> torch.Tensor:
+        global_feat, channel_feat, local_feat = features
+        
+        # Extract global context
+        context = self.context_extractor(input_x)
+        
+        # Concatenate features and compute weights
+        features_concat = torch.cat([global_feat, channel_feat, local_feat], dim=1)
+        weights = self.gate_conv(features_concat)
+        weights = F.softmax(weights, dim=1)
+        
+        # Context modulation (broadcast context to match weights shape)
+        context_pooled = F.adaptive_avg_pool2d(context, 1)  # (B, C, 1, 1)
+        weights = weights * context_pooled.mean(dim=1, keepdim=True)  # (B, 1, 1, 1)
+        
+        # Weighted fusion
+        weights = weights.view(-1, 3, 1, 1, 1)
+        features_stacked = torch.stack([global_feat, channel_feat, local_feat], dim=1)
+        fused = (weights * features_stacked).sum(dim=1)
+        
+        # Residual connection
+        return input_x + self.gamma * fused
+
+
+class HighPerfGAM(nn.Module):
+    """
+    High-Performance Global Attention Mechanism
+    接口与conv.py中的其他注意力模块一致
+    """
+    
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        """
+        Args:
+            c1: 输入通道数
+            c2: 输出通道数 (默认等于c1)
+            reduction: 通道缩减比例
+            num_heads: 多头注意力头数
+            m_dim: Performer的随机特征维度
+        """
+        super().__init__()
+        
+        # 处理conv.py的参数格式
+        c2 = c2 or c1
+        
+        self.c1 = c1
+        self.c2 = c2
+        self.reduction = reduction
+        self.num_heads = num_heads
+        self.m_dim = m_dim
+        
+        # 通道调整层（如果输入输出通道不同）
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+        
+        # Three attention branches
+        self.global_attention = PerformerAttention(c2, num_heads, m_dim)
+        self.channel_attention = AdaptiveChannelAttention(c2, reduction)
+        self.local_refinement = LocalSpatialRefinement(c2)
+        
+        # Context-aware dynamic fusion
+        self.fusion_gate = ContextAwareGating(c2, reduction // 2)
+        
+        # Layer normalization for global branch
+        self.norm = nn.LayerNorm(c2)
+        
+        # Progressive attention weighting (简化版本)
+        self.depth_weight = nn.Parameter(torch.tensor(0.5))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        
+        # Adjust channels if needed
+        x = self.channel_adjust(x)
+        B, C, H, W = x.shape
+        x_orig = x
+        
+        # Reshape for global attention
+        x_reshaped = x.flatten(2).transpose(1, 2)  # [B, H*W, C]
+        
+        # Global attention branch
+        global_feat = self.global_attention(self.norm(x_reshaped))
+        global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+        global_feat = global_feat * self.depth_weight
+        
+        # Channel attention branch
+        channel_feat = self.channel_attention(x)
+        
+        # Local refinement branch
+        local_feat = self.local_refinement(x)
+        
+        # Dynamic fusion with context-aware gating
+        output = self.fusion_gate((global_feat, channel_feat, local_feat), x_orig)
+        
+        # Residual connection
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        
+        return identity + output
+
+
+class HighPerfGAMBlock(nn.Module):
+    """
+    HighPerfGAM集成块，可以直接替换Conv或用于C2f
+    """
+    
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        
+        # Shortcut connection
+        self.shortcut = nn.Identity()
+        if c1 != c2:
+            self.shortcut = Conv(c1, c2, 1)
+    
+    def forward(self, x):
+        identity = self.shortcut(x)
+        
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        
+        return out + identity
+
+
+class C2f_HighPerfGAM(nn.Module):
+    """C2f模块集成HighPerfGAM"""
+    
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        
+        # 使用HighPerfGAMBlock
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+    
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
