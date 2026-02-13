@@ -2062,10 +2062,6 @@ class C2f_HighPerfGAM(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
         
- import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
 
 class ECAPlusPlus(nn.Module):
     """
