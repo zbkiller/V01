@@ -2061,3 +2061,129 @@ class C2f_HighPerfGAM(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+        
+ import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class ECAPlusPlus(nn.Module):
+    """
+    ECA++: Enhanced Efficient Channel Attention
+    -------------------------------------------------
+    在原始ECA基础上，以近乎零额外代价提升性能。
+    
+    核心改进：
+        1. 多尺度局部交叉通道交互（两个不同核大小的1D卷积）
+        2. 温度缩放注意力权重（可学习温度参数）
+        3. 极简空间上下文融合（单参数控制全局最大池化调制）
+        4. 残差连接自适应缩放（可学习残差系数）
+    
+    参数：
+        channels (int): 输入特征图的通道数
+        gamma (int): 用于计算自适应卷积核大小的参数，默认2
+        b (int): 用于计算自适应卷积核大小的参数，默认1
+    
+    使用示例：
+        >>> eca_pp = ECAPlusPlus(64)
+        >>> x = torch.randn(16, 64, 32, 32)
+        >>> out = eca_pp(x)   # 形状与x相同
+    """
+    def __init__(self, channels, gamma=2, b=1):
+        super().__init__()
+        self.channels = channels
+        self.gamma = gamma
+        self.b = b
+
+        # ---------- 动态计算ECA卷积核大小（与原始ECA完全相同）----------
+        t = int(abs((math.log2(channels) + b) / gamma))
+        kernel_size = t if t % 2 else t + 1   # 确保为奇数
+
+        # ---------- 多尺度1D卷积 ----------
+        # 主卷积（原始尺度）
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size,
+                               padding=(kernel_size - 1) // 2, bias=False)
+        # 辅助卷积（较小尺度，捕获更局部依赖）
+        kernel_size2 = max(3, kernel_size - 2) if kernel_size > 5 else kernel_size
+        self.conv2 = nn.Conv1d(1, 1, kernel_size=kernel_size2,
+                               padding=(kernel_size2 - 1) // 2, bias=False)
+        # 可学习融合系数（多尺度加权求和）
+        self.fusion_weight = nn.Parameter(torch.ones(1) * 0.5)
+
+        # ---------- 温度缩放（可学习）----------
+        # 使用Softplus保证非负，且梯度处处平滑
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+
+        # ---------- 极轻量通道交互偏置 ----------
+        self.interaction = nn.Parameter(torch.ones(1, channels, 1, 1) * 0.1)
+
+        # ---------- 空间上下文融合 ----------
+        # 初始化为0.1，保证梯度可以流动；不使用硬阈值
+        self.spatial_weight = nn.Parameter(torch.ones(1) * 0.1)
+
+        # ---------- 残差缩放 ----------
+        self.residual_scale = nn.Parameter(torch.ones(1) * 0.1)
+
+        # ---------- 初始化权重 ----------
+        self._init_weights()
+
+    def _init_weights(self):
+        """自定义权重初始化，保持与ECA相似的分布"""
+        nn.init.normal_(self.conv1.weight, std=0.01)
+        nn.init.normal_(self.conv2.weight, std=0.01)
+        # 交互偏置已初始化为0.1，无需重复
+        nn.init.constant_(self.interaction, 0.1)
+
+    def forward(self, x):
+        """
+        输入: (B, C, H, W)
+        输出: (B, C, H, W)   通道加权后的特征图（残差形式）
+        """
+        identity = x
+        B, C, H, W = x.shape
+
+        # ----- 1. 通道描述子（全局平均池化）-----
+        y = self.avg_pool(x)                 # (B, C, 1, 1)
+
+        # ----- 2. 多尺度1D卷积（捕获跨通道依赖）-----
+        y = y.squeeze(-1).transpose(-1, -2)  # (B, 1, C)
+        y1 = self.conv1(y)                  # 尺度1
+        y2 = self.conv2(y)                  # 尺度2
+        # 可学习的加权求和
+        y_fused = self.fusion_weight * y1 + (1 - self.fusion_weight) * y2
+
+        # ----- 3. 温度缩放 -----
+        # Softplus保证温度>0，平滑可导
+        temp = F.softplus(self.temperature) + 1e-6
+        y_scaled = y_fused / temp
+
+        # ----- 4. 恢复形状并添加可学习交互偏置 -----
+        y_att = y_scaled.transpose(-1, -2).unsqueeze(-1)  # (B, C, 1, 1)
+        channel_att = torch.sigmoid(y_att + self.interaction)
+
+        # ----- 5. 空间上下文调制（全局最大池化）-----
+        # 使用sigmoid控制调制强度，无硬阈值，梯度始终流通
+        spatial_context = F.adaptive_max_pool2d(x, 1)     # (B, C, 1, 1)
+        spatial_modulation = torch.sigmoid(spatial_context * self.spatial_weight)
+        # 轻量融合：通道注意力乘以(1 + 空间调制*0.2)
+        channel_att = channel_att * (1.0 + spatial_modulation * 0.2)
+
+        # ----- 6. 应用注意力（带残差缩放）-----
+        attended = x * torch.sigmoid(channel_att)
+        output = identity + attended * torch.sigmoid(self.residual_scale)
+
+        return output
+
+    def count_params(self):
+        """返回可训练参数总数"""
+        return sum(p.numel() for p in self.parameters())
+
+    def count_flops(self, input_size=(1, 64, 56, 56)):
+        """估算前向传播的理论FLOPs（乘加操作数）"""
+        B, C, H, W = input_size
+        flops = C * H * W                     # 全局平均池化
+        k1 = self.conv1.kernel_size[0]
+        k2 = self.conv2.kernel_size[0]
+        flops += 2 * C * (k1 + k2)           # 两个1D卷积
+        flops += 3 * C                      # 逐元素操作（近似）
+        return flops
