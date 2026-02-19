@@ -2108,21 +2108,30 @@ class ECAPlusPlus(nn.Module):
         output = identity + attended * torch.sigmoid(self.residual_scale)
         return output
 
+import importlib
+
 class Bottleneck_Attention(nn.Module):
-    """Bottleneck with pluggable attention module (applied after second conv)"""
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5, attention=None):
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3,3), e=0.5, attention=None):
         super().__init__()
-        print(f"g type: {type(g)}, value: {g}")
-        c_ = int(c2 * e)  # hidden channels
+        c_ = int(c2 * e)
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
         self.add = shortcut and c1 == c2
-        # 注意力模块（如果指定）
+
+        # 动态导入注意力类
+        if isinstance(attention, str):
+            try:
+                # 从 ultralytics.nn.modules 模块导入
+                module = importlib.import_module('ultralytics.nn.modules')
+                attention = getattr(module, attention)
+            except (ImportError, AttributeError) as e:
+                raise ValueError(f"Cannot import attention class '{attention}'") from e
+
         self.attention = attention(c2) if attention is not None else nn.Identity()
 
     def forward(self, x):
         out = self.cv2(self.cv1(x))
-        out = self.attention(out)   # 注意力作用在第二个卷积的输出上
+        out = self.attention(out)
         if self.add:
             out = x + out
         return out
