@@ -637,7 +637,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
                  BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3,
                  SE_Attention, SK_Attention, GAM_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention, ResBlock_CBAM_Attention,
-                 CoordAtt, ECA_Attention, CloFormer, ODConv_3rd, ConvNextBlock, HighPerfGAM, C2f_HighPerfGAM, ECAPlusPlus):
+                 CoordAtt, ECA_Attention, CloFormer, ODConv_3rd, ConvNextBlock, HighPerfGAM, C2f_HighPerfGAM, ECAPlusPlus, C2f_Attention):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
