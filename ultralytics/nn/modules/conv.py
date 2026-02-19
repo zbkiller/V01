@@ -2136,20 +2136,35 @@ class Bottleneck_Attention(nn.Module):
             out = x + out
         return out
 
+import torch
+import torch.nn as nn
+from .conv import Conv, Bottleneck_Attention  # 假设 Bottleneck_Attention 在同一文件中
+
 class C2f_Attention(nn.Module):
-    """C2f with attention in each bottleneck"""
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, attention=None):
+    """
+    CSP Bottleneck with 2 convolutions and pluggable attention in each bottleneck.
+    Args:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        shortcut (bool): Whether to use shortcut connections in bottlenecks. Default: False.
+        e (float): Expansion factor for hidden channels. Default: 0.5.
+        attention (str or nn.Module): Attention module class name (string) or class itself. Default: None.
+        n (int): Number of bottlenecks. Default: 1.
+        g (int): Number of groups for grouped convolutions. Default: 1.
+    """
+    def __init__(self, c1, c2, shortcut=False, e=0.5, attention=None, n=1, g=1):
         super().__init__()
-        self.c = int(c2 * e)
+        self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        # 使用 Bottleneck_Attention 替换原始 Bottleneck
+        # 创建 n 个 Bottleneck_Attention，每个共享相同的参数
         self.m = nn.ModuleList(
             Bottleneck_Attention(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, attention=attention)
             for _ in range(n)
         )
 
     def forward(self, x):
+        """Forward pass of C2f_Attention."""
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
