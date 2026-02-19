@@ -2107,3 +2107,39 @@ class ECAPlusPlus(nn.Module):
         attended = x * torch.sigmoid(channel_att)
         output = identity + attended * torch.sigmoid(self.residual_scale)
         return output
+
+class Bottleneck_Attention(nn.Module):
+    """Bottleneck with pluggable attention module (applied after second conv)"""
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5, attention=None):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+        # 注意力模块（如果指定）
+        self.attention = attention(c2) if attention is not None else nn.Identity()
+
+    def forward(self, x):
+        out = self.cv2(self.cv1(x))
+        out = self.attention(out)   # 注意力作用在第二个卷积的输出上
+        if self.add:
+            out = x + out
+        return out
+
+class C2f_Attention(nn.Module):
+    """C2f with attention in each bottleneck"""
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, attention=None):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        # 使用 Bottleneck_Attention 替换原始 Bottleneck
+        self.m = nn.ModuleList(
+            Bottleneck_Attention(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, attention=attention)
+            for _ in range(n)
+        )
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
