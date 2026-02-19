@@ -2112,6 +2112,7 @@ class Bottleneck_Attention(nn.Module):
     """Bottleneck with pluggable attention module (applied after second conv)"""
     def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5, attention=None):
         super().__init__()
+        print(f"g type: {type(g)}, value: {g}")
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
