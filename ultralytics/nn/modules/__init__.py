@@ -29,6 +29,4 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'C2f', 'C3x', 'C3TR', 'C3Ghost', 'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'Detect',
            'Segment', 'Pose', 'Classify', 'TransformerEncoderLayer', 'RepC3', 'RTDETRDecoder', 'AIFI',
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP', 'GAM_Attention',
-           'SE_Attention', '
-           +
-           _Attention', 'Shuffle_Attention', 'EffectiveSE_Attention', 'ResBlock_CBAM_Attention', 'Triplet_Attention', 'BasicRFB_Attention', 'C2f_DSConv2D_Attention', 'CoordAtt', 'CloFormer', 'ODConv_3rd', 'ConvNextBlock', 'HighPerfGAM', 'C2f_HighPerfGAM', 'C2f_HighPerfGAM_NoGlobal', 'C2f_HighPerfGAM_NoChannel', 'C2f_HighPerfGAM_NoLocal', 'ECAPlusPlus', 'C2f_Attention', 'Bottleneck_Attention', 'SimAM')
+           'SE_Attention', 'ECA_Attention', 'Shuffle_Attention', 'EffectiveSE_Attention', 'ResBlock_CBAM_Attention', 'Triplet_Attention', 'BasicRFB_Attention', 'C2f_DSConv2D_Attention', 'CoordAtt', 'CloFormer', 'ODConv_3rd', 'ConvNextBlock', 'HighPerfGAM', 'C2f_HighPerfGAM', 'C2f_HighPerfGAM_NoGlobal', 'C2f_HighPerfGAM_NoChannel', 'C2f_HighPerfGAM_NoLocal', 'ECAPlusPlus', 'C2f_Attention', 'Bottleneck_Attention', 'SimAM')
