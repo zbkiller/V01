@@ -2061,7 +2061,114 @@ class C2f_HighPerfGAM(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
-        
+
+class HighPerfGAM_NoGlobal(nn.Module):
+    """HighPerfGAM 变体：移除全局注意力分支"""
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        self.reduction = reduction
+
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
+        self.channel_attention = AdaptiveChannelAttention(c2, reduction)
+        self.local_refinement = LocalSpatialRefinement(c2)
+
+        # 简单可学习融合权重（两支路）
+        self.fusion_weights = nn.Parameter(torch.ones(2) / 2)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        identity = x
+        x = self.channel_adjust(x)
+        channel_feat = self.channel_attention(x)
+        local_feat = self.local_refinement(x)
+
+        weights = F.softmax(self.fusion_weights, dim=0)
+        fused = weights[0] * channel_feat + weights[1] * local_feat
+
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        return identity + self.gamma * fused       
+
+class HighPerfGAM_NoChannel(nn.Module):
+    """HighPerfGAM 变体：移除通道注意力分支"""
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        self.num_heads, self.m_dim = num_heads, m_dim
+
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
+        self.global_attention = PerformerAttention(c2, num_heads, m_dim)
+        self.local_refinement = LocalSpatialRefinement(c2)
+        self.norm = nn.LayerNorm(c2)
+
+        self.fusion_weights = nn.Parameter(torch.ones(2) / 2)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        identity = x
+        x = self.channel_adjust(x)
+        B, C, H, W = x.shape
+
+        x_reshaped = x.flatten(2).transpose(1, 2)
+        global_feat = self.global_attention(self.norm(x_reshaped))
+        global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+        local_feat = self.local_refinement(x)
+
+        weights = F.softmax(self.fusion_weights, dim=0)
+        fused = weights[0] * global_feat + weights[1] * local_feat
+
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        return identity + self.gamma * fused
+
+class HighPerfGAM_NoLocal(nn.Module):
+    """HighPerfGAM 变体：移除局部细化分支"""
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        self.reduction, self.num_heads, self.m_dim = reduction, num_heads, m_dim
+
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
+        self.global_attention = PerformerAttention(c2, num_heads, m_dim)
+        self.channel_attention = AdaptiveChannelAttention(c2, reduction)
+        self.norm = nn.LayerNorm(c2)
+
+        self.fusion_weights = nn.Parameter(torch.ones(2) / 2)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        identity = x
+        x = self.channel_adjust(x)
+        B, C, H, W = x.shape
+
+        x_reshaped = x.flatten(2).transpose(1, 2)
+        global_feat = self.global_attention(self.norm(x_reshaped))
+        global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+
+        channel_feat = self.channel_attention(x)
+
+        weights = F.softmax(self.fusion_weights, dim=0)
+        fused = weights[0] * global_feat + weights[1] * channel_feat
+
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        return identity + self.gamma * fused
 
 class ECAPlusPlus(nn.Module):
     def __init__(self, channels=None, gamma=2, b=1):
