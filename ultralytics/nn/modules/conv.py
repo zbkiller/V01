@@ -474,23 +474,22 @@ class ECA_Attention(nn.Module):
 class SimAM(nn.Module):
     """SimAM: A Simple, Parameter-Free Attention Module (ICML 2021)
     Args:
+        channels (int, optional): Number of input channels. Only for compatibility with YOLO parser. Default: None.
         e_lambda (float): Regularization parameter. Default: 1e-4
     """
-    def __init__(self, e_lambda=1e-4):
+    def __init__(self, channels=None, e_lambda=1e-4):
         super().__init__()
         self.e_lambda = e_lambda
         self.sigmoid = nn.Sigmoid()
+        # channels 参数仅用于兼容 YOLO 解析，不使用
 
     def forward(self, x):
         b, c, h, w = x.shape
         n = h * w - 1
-        # 计算均值与方差
-        mu = x.mean(dim=(2, 3), keepdim=True)          # (b, c, 1, 1)
-        var = ((x - mu) ** 2).mean(dim=(2, 3), keepdim=True)  # (b, c, 1, 1)
-        # 能量函数： e = (var + lambda) / ( (x - mu)^2 + var + lambda )
-        # 注意力权重 = 1 / (1 + e) 的 sigmoid 近似
+        mu = x.mean(dim=(2,3), keepdim=True)
+        var = ((x - mu)**2).mean(dim=(2,3), keepdim=True)
         x_norm = (x - mu) / torch.sqrt(var + self.e_lambda)
-        att = 1.0 / (1.0 + torch.exp(-x_norm))   # sigmoid 形式
+        att = 1.0 / (1.0 + torch.exp(-x_norm))
         return x * att
         
 ####################ShuffleAttention、ECA、EffectiveSE、SEshuffle Attention https://cv2023.blog.csdn.net/article/details/130560700#################
