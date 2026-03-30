@@ -2063,12 +2063,13 @@ class C2f_HighPerfGAM(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 class HighPerfGAM_NoGlobal(nn.Module):
-    """HighPerfGAM 变体：移除全局注意力分支"""
+    """移除全局注意力分支"""
     def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
         super().__init__()
         c2 = c2 or c1
         self.c1, self.c2 = c1, c2
         self.reduction = reduction
+        # 保留 num_heads, m_dim 仅为了签名兼容，内部不使用
 
         if c1 != c2:
             self.channel_adjust = Conv(c1, c2, 1)
@@ -2078,7 +2079,7 @@ class HighPerfGAM_NoGlobal(nn.Module):
         self.channel_attention = AdaptiveChannelAttention(c2, reduction)
         self.local_refinement = LocalSpatialRefinement(c2)
 
-        # 简单可学习融合权重（两支路）
+        # 两支路可学习融合权重
         self.fusion_weights = nn.Parameter(torch.ones(2) / 2)
         self.gamma = nn.Parameter(torch.tensor(0.1))
 
@@ -2093,15 +2094,50 @@ class HighPerfGAM_NoGlobal(nn.Module):
 
         if identity.shape[1] != self.c2:
             identity = self.channel_adjust(identity)
-        return identity + self.gamma * fused       
+        return identity + self.gamma * fused
+
+
+class HighPerfGAMBlock_NoGlobal(nn.Module):
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM_NoGlobal(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        self.shortcut = nn.Identity() if c1 == c2 else Conv(c1, c2, 1)
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class C2f_HighPerfGAM_NoGlobal(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock_NoGlobal(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))   
 
 class HighPerfGAM_NoChannel(nn.Module):
-    """HighPerfGAM 变体：移除通道注意力分支"""
+    """移除通道注意力分支"""
     def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
         super().__init__()
         c2 = c2 or c1
         self.c1, self.c2 = c1, c2
-        self.num_heads, self.m_dim = num_heads, m_dim
+        self.num_heads = num_heads
+        self.m_dim = m_dim
 
         if c1 != c2:
             self.channel_adjust = Conv(c1, c2, 1)
@@ -2123,6 +2159,7 @@ class HighPerfGAM_NoChannel(nn.Module):
         x_reshaped = x.flatten(2).transpose(1, 2)
         global_feat = self.global_attention(self.norm(x_reshaped))
         global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+
         local_feat = self.local_refinement(x)
 
         weights = F.softmax(self.fusion_weights, dim=0)
@@ -2132,13 +2169,49 @@ class HighPerfGAM_NoChannel(nn.Module):
             identity = self.channel_adjust(identity)
         return identity + self.gamma * fused
 
+
+class HighPerfGAMBlock_NoChannel(nn.Module):
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM_NoChannel(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        self.shortcut = nn.Identity() if c1 == c2 else Conv(c1, c2, 1)
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class C2f_HighPerfGAM_NoChannel(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock_NoChannel(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
 class HighPerfGAM_NoLocal(nn.Module):
-    """HighPerfGAM 变体：移除局部细化分支"""
+    """移除局部细化分支"""
     def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
         super().__init__()
         c2 = c2 or c1
         self.c1, self.c2 = c1, c2
-        self.reduction, self.num_heads, self.m_dim = reduction, num_heads, m_dim
+        self.reduction = reduction
+        self.num_heads = num_heads
+        self.m_dim = m_dim
 
         if c1 != c2:
             self.channel_adjust = Conv(c1, c2, 1)
@@ -2169,6 +2242,40 @@ class HighPerfGAM_NoLocal(nn.Module):
         if identity.shape[1] != self.c2:
             identity = self.channel_adjust(identity)
         return identity + self.gamma * fused
+
+
+class HighPerfGAMBlock_NoLocal(nn.Module):
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM_NoLocal(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        self.shortcut = nn.Identity() if c1 == c2 else Conv(c1, c2, 1)
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class C2f_HighPerfGAM_NoLocal(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock_NoLocal(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 
 class ECAPlusPlus(nn.Module):
     def __init__(self, channels=None, gamma=2, b=1):
