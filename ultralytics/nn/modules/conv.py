@@ -422,7 +422,7 @@ class SE_Attention(nn.Module):
         return x * y.expand_as(x)
 ###################### SENet     ####     end   by  AI&CV  ###############################
 
-class ECA_Attention(nn.Module):
+class xxECA_Attention(nn.Module):
 
     """Constructs a ECA module.
     Args:
@@ -444,6 +444,89 @@ class ECA_Attention(nn.Module):
         y = self.sigmoid(y)
 
         return x * y.expand_as(x)
+
+class ECA_Attention(nn.Module):
+    """
+    Robust ECA for Ultralytics:
+    - Handles argument order confusion caused by parse_model c1 injection.
+    - Forces odd kernel size to keep length unchanged.
+    """
+
+    def __init__(self, a=3, b=None, k_size=3):
+        """
+        Accepts various calling styles:
+        - ECA_Attention(3)              -> k_size=3
+        - ECA_Attention(512)            -> c1=512, k_size=3
+        - ECA_Attention(512, 3)         -> c1=512, k_size=3
+        - ECA_Attention(3, 512)         -> k_size=3, c1=512 (auto-swap)
+        """
+        super().__init__()
+
+        # Normalize inputs to ints when possible
+        def to_int(x):
+            if x is None:
+                return None
+            if isinstance(x, bool):
+                return int(x)
+            if isinstance(x, (int,)):
+                return int(x)
+            if isinstance(x, (float,)):
+                return int(x)
+            return x
+
+        a = to_int(a)
+        b = to_int(b)
+        k_size = to_int(k_size)
+
+        # Determine (c1, k_size) from (a, b) with heuristic:
+        # - If only one positional arg:
+        #   - <=31: treat as k_size
+        #   - >31 : treat as c1
+        # - If two positional args:
+        #   - one large (>31) and one small (<=31): large->c1, small->k_size
+        c1 = None
+
+        if b is None:
+            if isinstance(a, int) and a > 31:
+                c1, k_size = a, k_size  # a is channels
+            else:
+                k_size = a if isinstance(a, int) else k_size
+        else:
+            if isinstance(a, int) and isinstance(b, int):
+                if a > 31 and b <= 31:
+                    c1, k_size = a, b
+                elif b > 31 and a <= 31:
+                    c1, k_size = b, a
+                else:
+                    # ambiguous: assume a=c1, b=k_size
+                    c1, k_size = a, b
+            else:
+                # fallback
+                c1, k_size = a, b
+
+        # Force odd kernel size
+        if not isinstance(k_size, int):
+            k_size = 3
+        if k_size % 2 == 0:
+            k_size += 1
+
+        self.c1 = c1  # optional, just for debug
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Optional safety check (uncomment if you want strict channel check)
+        # if self.c1 is not None and x.shape[1] != self.c1:
+        #     raise RuntimeError(f"ECA channel mismatch: got {x.shape[1]}, expected {self.c1}")
+
+        y = self.avg_pool(x)
+        y = y.squeeze(-1).transpose(-1, -2)      # [B,1,C]
+        y = self.conv(y)                         # [B,1,C] (guaranteed same length)
+        y = y.transpose(-1, -2).unsqueeze(-1)    # [B,C,1,1]
+        y = self.sigmoid(y)
+        return x * y   # broadcast即可
+
 ####################ShuffleAttention、ECA、EffectiveSE、SEshuffle Attention https://cv2023.blog.csdn.net/article/details/130560700#################
 class Shuffle_Attention(nn.Module):
 
