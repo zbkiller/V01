@@ -2370,6 +2370,120 @@ class ECAPlusPlus(nn.Module):
         output = identity + attended * torch.sigmoid(self.residual_scale)
         return output
 
+# ------------------------------------------------------------------
+# 变体 ②：ECA + 多尺度交互 (MS)
+# ------------------------------------------------------------------
+class ECAPlusPlus_MS(nn.Module):
+    """ECA with Multi-Scale interaction (no temperature, no spatial, no residual scaling)"""
+    def __init__(self, channels, gamma=2, b=1):
+        super().__init__()
+        self.channels = channels
+        self.gamma = gamma
+        self.b = b
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        # 自适应核大小 k1
+        t = int(abs((math.log2(channels) + b) / gamma))
+        k1 = t if t % 2 else t + 1
+        self.conv1 = nn.Conv1d(1, 1, k1, padding=(k1-1)//2, bias=False)
+
+        # 较小核 k2
+        k2 = max(3, k1-2) if k1 > 5 else k1
+        self.conv2 = nn.Conv1d(1, 1, k2, padding=(k2-1)//2, bias=False)
+
+        self.fusion_weight = nn.Parameter(torch.ones(1) * 0.5)   # α
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        y = self.avg_pool(x)                              # (B,C,1,1)
+        y = y.squeeze(-1).transpose(-1, -2)               # (B,1,C)
+        y1 = self.conv1(y)
+        y2 = self.conv2(y)
+        y_fused = self.fusion_weight * y1 + (1 - self.fusion_weight) * y2
+        att = torch.sigmoid(y_fused.transpose(-1, -2).unsqueeze(-1))
+        return x * att
+
+# ------------------------------------------------------------------
+# 变体 ③：ECA + 多尺度 + 温度缩放 (MS+TS)
+# ------------------------------------------------------------------
+class ECAPlusPlus_MS_TS(nn.Module):
+    """ECA + Multi-Scale + Temperature Scaling"""
+    def __init__(self, channels, gamma=2, b=1):
+        super().__init__()
+        self.channels = channels
+        self.gamma = gamma
+        self.b = b
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        t = int(abs((math.log2(channels) + b) / gamma))
+        k1 = t if t % 2 else t + 1
+        self.conv1 = nn.Conv1d(1, 1, k1, padding=(k1-1)//2, bias=False)
+
+        k2 = max(3, k1-2) if k1 > 5 else k1
+        self.conv2 = nn.Conv1d(1, 1, k2, padding=(k2-1)//2, bias=False)
+
+        self.fusion_weight = nn.Parameter(torch.ones(1) * 0.5)
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5)   # τ0
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        y = self.avg_pool(x)
+        y = y.squeeze(-1).transpose(-1, -2)
+        y1 = self.conv1(y)
+        y2 = self.conv2(y)
+        y_fused = self.fusion_weight * y1 + (1 - self.fusion_weight) * y2
+
+        tau = F.softplus(self.temperature) + 1e-6
+        y_scaled = y_fused / tau
+
+        att = torch.sigmoid(y_scaled.transpose(-1, -2).unsqueeze(-1))
+        return x * att
+
+# ------------------------------------------------------------------
+# 变体 ④：ECA + 多尺度 + 温度 + 空间调制 (MS+TS+SC)
+# ------------------------------------------------------------------
+class ECAPlusPlus_MS_TS_SC(nn.Module):
+    """ECA + Multi-Scale + Temperature + Spatial Context"""
+    def __init__(self, channels, gamma=2, b=1):
+        super().__init__()
+        self.channels = channels
+        self.gamma = gamma
+        self.b = b
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        t = int(abs((math.log2(channels) + b) / gamma))
+        k1 = t if t % 2 else t + 1
+        self.conv1 = nn.Conv1d(1, 1, k1, padding=(k1-1)//2, bias=False)
+
+        k2 = max(3, k1-2) if k1 > 5 else k1
+        self.conv2 = nn.Conv1d(1, 1, k2, padding=(k2-1)//2, bias=False)
+
+        self.fusion_weight = nn.Parameter(torch.ones(1) * 0.5)
+        self.temperature = nn.Parameter(torch.ones(1) * 0.5)
+        self.spatial_weight = nn.Parameter(torch.ones(1) * 0.1)   # β
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        y = self.avg_pool(x)
+        y = y.squeeze(-1).transpose(-1, -2)
+        y1 = self.conv1(y)
+        y2 = self.conv2(y)
+        y_fused = self.fusion_weight * y1 + (1 - self.fusion_weight) * y2
+
+        tau = F.softplus(self.temperature) + 1e-6
+        y_scaled = y_fused / tau
+        att = torch.sigmoid(y_scaled.transpose(-1, -2).unsqueeze(-1))
+
+        # 空间调制
+        spatial = F.adaptive_max_pool2d(x, 1)
+        spatial_factor = torch.sigmoid(spatial * self.spatial_weight)
+        att = att * (1 + 0.2 * spatial_factor)
+
+        return x * att
+
+-----------------------------------------------------------------
+
+
 import importlib
 
 class Bottleneck_Attention(nn.Module):
