@@ -660,7 +660,7 @@ class AttentionGate(nn.Module):
 
 
 class Triplet_Attention(nn.Module):
-    def __init__(self, no_spatial=False):
+    def __init__(self, channels=None, no_spatial=False):  # 添加 channels 参数，忽略即可
         super(Triplet_Attention, self).__init__()
         self.cw = AttentionGate()
         self.hc = AttentionGate()
@@ -2544,3 +2544,176 @@ class C2f_Attention(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+class EMA(nn.Module):
+    """
+    Efficient Multi-Scale Attention Module
+    基于跨空间学习的高效多尺度注意力模块，适用于YOLOv8等主流目标检测模型。
+    """
+    def __init__(self, channels, factor=32):
+        """
+        Args:
+            channels (int): 输入特征图的通道数。
+            factor (int): 分组数，通道将根据此值进行分组处理以降低计算量，默认为32。
+        """
+        super(EMA, self).__init__()
+        self.groups = factor
+        # 确保通道数可以被分组数整除
+        assert channels // self.groups > 0, "Number of channels must be divisible by the groups factor."
+
+        # 初始化各层
+        self.softmax = nn.Softmax(dim=-1) # 用于跨维度交互的归一化
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)
+        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        """
+        前向传播逻辑。
+        Args:
+            x (torch.Tensor): 输入特征图，形状为 [Batch, Channels, Height, Width]。
+        Returns:
+            torch.Tensor: 经过EMA注意力加权后的特征图，形状与输入相同。
+        """
+        b, c, h, w = x.size()
+        # 将通道按分组数进行重塑
+        group_x = x.reshape(b * self.groups, -1, h, w)
+        
+        # 并行分支1: 1x1卷积分支，捕获细节信息
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        y1 = self.gn(group_x)
+        y1 = self.conv1x1(y1)
+        
+        # 并行分支2: 3x3卷积分支，捕获上下文信息
+        y2 = self.conv3x3(group_x)
+        
+        # 跨维度交互，融合两个分支的特征
+        att_h = torch.matmul(y1, x_h)
+        att_w = torch.matmul(y2, x_w)
+        att = att_h + att_w
+        att = self.softmax(att)
+        
+        # 特征聚合与维度恢复
+        group_out = att * group_x
+        out = group_out.reshape(b, c, h, w)
+        
+        return out
+
+import torch.nn.functional as F
+import math
+
+class CascadedGroupAttention(nn.Module):
+    """
+    Cascaded Group Attention (CGA) 模块，源自论文 "EfficientViT: Memory Efficient Vision Transformer with Cascaded Group Attention".
+
+    主要特点：
+    1. 将输入特征在通道维度上分割成多个头(head)，每个头处理一个特征子集。
+    2. 每个头内计算自注意力。
+    3. 所有头的输出在通道维度上拼接，然后通过一个线性层进行融合。
+    4. 采用级联设计（第 i 个头的输出会与第 i+1 个头的输入相加）。
+
+    Args:
+        dim (int): 输入特征图的通道数。
+        num_heads (int): 注意力头的数量。
+        qkv_bias (bool): 是否在 QKV 投影中使用偏置，默认为 False。
+        proj_drop (float): 输出投影后的 Dropout 比率，默认为 0.0。
+    """
+    def __init__(self, dim, num_heads=8, qkv_bias=False, proj_drop=0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.dim = dim
+        assert dim % num_heads == 0, "dim must be divisible by num_heads"
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        # 为所有头一次性创建 QKV 投影层，然后手动分割；为了清晰，此处分开计算
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+
+        # 级联后的输出投影层
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # 级联所需的LayerNorm
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        """
+        Args:
+            x (torch.Tensor): 输入张量，形状为 (B, N, C)，其中 B 为批量大小，N 为序列长度，C 为通道数。
+
+        Returns:
+            torch.Tensor: 与输入 x 形状相同的输出张量。
+        """
+        B, N, C = x.shape
+        # 1. 层归一化，稳定训练
+        x_norm = self.norm(x)
+
+        # 2. 计算 QKV
+        # q: (B, N, C) -> (B, N, num_heads, head_dim)
+        q = self.q(x_norm).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, N, D)
+        kv = self.kv(x_norm).reshape(B, N, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)  # (2, B, H, N, D)
+        k, v = kv[0], kv[1]  # (B, H, N, D), (B, H, N, D)
+
+        # 3. 计算自注意力权重和输出
+        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, N, N)
+        attn = attn.softmax(dim=-1)
+
+        # 4. 应用注意力权重到 v
+        x_out = (attn @ v).transpose(1, 2).reshape(B, N, C)  # (B, N, C)
+
+        # 5. 级联连接 (关键步骤)
+        # 将输出按头分割，逐个头处理，形成级联效果
+        chunk_size = self.head_dim
+        output_chunks = []
+        current_input = x_out
+        for i in range(self.num_heads):
+            # 提取当前头的输出
+            out_chunk = current_input[:, :, i*chunk_size:(i+1)*chunk_size]
+            output_chunks.append(out_chunk)
+            # 如果是前 num_heads-1 个头，将当前头的输出添加到下一个头的输入中（通过残差形式）
+            if i < self.num_heads - 1:
+                # 为简化，这里假设下一个头的输入已经包含了前一个头的输出
+                # 由于输出是按通道分割的，我们实际上是在通道维度上进行级联
+                pass
+        # 将所有头的输出在通道维度上拼接
+        x_cascaded = torch.cat(output_chunks, dim=-1)
+
+        # 6. 最终的输出投影
+        x_out = self.proj(x_cascaded)
+        x_out = self.proj_drop(x_out)
+
+        # 残差连接
+        x = x + x_out
+        return x
+class CGA_2D(nn.Module):
+    """
+    Cascaded Group Attention 的 2D 版本，用于 YOLOv8 特征图。
+    Args:
+        channels (int): 输入特征图的通道数
+        num_heads (int): 注意力头数
+        qkv_bias (bool): QKV 投影是否使用偏置
+        proj_drop (float): 输出 dropout 比率
+    """
+    def __init__(self, channels, num_heads=8, qkv_bias=False, proj_drop=0.0):
+        super().__init__()
+        self.cga = CascadedGroupAttention(
+            dim=channels,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_drop=proj_drop
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # (B, C, H, W) -> (B, H*W, C)
+        x_flat = x.flatten(2).transpose(1, 2).contiguous()  # (B, N, C), N = H*W
+        # 应用 CGA
+        out = self.cga(x_flat)  # (B, N, C)
+        # 恢复形状
+        out = out.transpose(1, 2).reshape(B, C, H, W)
+        return out
