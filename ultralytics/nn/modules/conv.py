@@ -2577,30 +2577,49 @@ class EMA(nn.Module):
             x (torch.Tensor): 输入特征图，形状为 [Batch, Channels, Height, Width]。
         Returns:
             torch.Tensor: 经过EMA注意力加权后的特征图，形状与输入相同。
+
+        Notes:
+            The previous implementation used ``torch.matmul(y1, x_h)`` and
+            ``torch.matmul(y2, x_w)`` directly on 4D tensors. This only works by
+            accident for some square feature maps and fails on rectangular
+            validation shapes, e.g. h=34, w=24, with:
+                Expected batch2 [..., 34] but got [..., 24].
+            This implementation follows the standard EMA block formulation and
+            is shape-safe for both square and rectangular feature maps.
         """
         b, c, h, w = x.size()
-        # 将通道按分组数进行重塑
         group_x = x.reshape(b * self.groups, -1, h, w)
-        
-        # 并行分支1: 1x1卷积分支，捕获细节信息
+
+        # Coordinate aggregation branch. x_h: [B*g, Cg, H, 1],
+        # x_w: [B*g, Cg, W, 1] after permute. Concatenate along spatial axis,
+        # then split back to H and W attention maps.
         x_h = self.pool_h(group_x)
         x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
-        y1 = self.gn(group_x)
-        y1 = self.conv1x1(y1)
-        
-        # 并行分支2: 3x3卷积分支，捕获上下文信息
-        y2 = self.conv3x3(group_x)
-        
-        # 跨维度交互，融合两个分支的特征
-        att_h = torch.matmul(y1, x_h)
-        att_w = torch.matmul(y2, x_w)
-        att = att_h + att_w
-        att = self.softmax(att)
-        
-        # 特征聚合与维度恢复
-        group_out = att * group_x
-        out = group_out.reshape(b, c, h, w)
-        
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        # Local context branch and normalized coordinate-gated branch.
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.sigmoid())
+        x2 = self.conv3x3(group_x)
+
+        # Cross-spatial interaction. Shapes:
+        #   agp(x1).reshape(B*g, 1, Cg) @ x2.reshape(B*g, Cg, H*W)
+        #   agp(x2).reshape(B*g, 1, Cg) @ x1.reshape(B*g, Cg, H*W)
+        # Result is [B*g, 1, H, W], broadcast-safe over channel dimension.
+        c_per_group = group_x.shape[1]
+        weights = (
+            torch.matmul(
+                self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1)),
+                x2.reshape(b * self.groups, c_per_group, -1),
+            )
+            + torch.matmul(
+                self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1)),
+                x1.reshape(b * self.groups, c_per_group, -1),
+            )
+        ).reshape(b * self.groups, 1, h, w)
+
+        out = (group_x * weights.sigmoid()).reshape(b, c, h, w)
         return out
 
 import torch.nn.functional as F
