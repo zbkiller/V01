@@ -12,7 +12,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, CBAM, GAM_Attention, SE_Attention, SK_Attention, ECA_Attention,
                                     Shuffle_Attention, EffectiveSE_Attention, ResBlock_CBAM_Attention, Triplet_Attention, BasicRFB_Attention, C2f_DSConv2D_Attention,
-                                    CoordAtt, CloFormer, ODConv_3rd, ConvNextBlock, HighPerfGAM, C2f_HighPerfGAM, C2f_HighPerfGAM_GlobalOnly, C2f_HighPerfGAM_NoGlobal, C2f_HighPerfGAM_NoChannel, C2f_HighPerfGAM_NoLocal, ECAPlusPlus, ECAPlusPlus_MS, ECAPlusPlus_MS_TS, ECAPlusPlus_MS_TS_SC, C2f_Attention, Bottleneck_Attention, SimAM, EMA, CGA_2D)
+                                    C2f_CoordAtt, C2f_NAM, CloFormer, ODConv_3rd, ConvNextBlock, HighPerfGAM, C2f_HighPerfGAM, C2f_HighPerfGAM_GlobalOnly, C2f_HighPerfGAM_NoGlobal, C2f_HighPerfGAM_NoChannel, C2f_HighPerfGAM_NoLocal, ECAPlusPlus, ECAPlusPlus_MS, ECAPlusPlus_MS_TS, ECAPlusPlus_MS_TS_SC, C2f_Attention, Bottleneck_Attention, SimAM, EMA, CGA_2D)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.yolo.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
