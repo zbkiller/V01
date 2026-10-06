@@ -23,6 +23,7 @@ from .layers import CloLayer
 from .patch_embedding import PatchEmbedding
 from typing import List
 from typing import Optional, Tuple
+from ultralytics.nn.modules.block import Bottleneck
 """
 from .layers import CloLayer
 from .patch_embedding import PatchEmbedding
