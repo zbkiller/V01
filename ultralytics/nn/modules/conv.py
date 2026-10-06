@@ -957,24 +957,31 @@ class h_swish(nn.Module):
 
 
 class CoordAtt(nn.Module):
-    def __init__(self, inp, reduction=32):
-        super(CoordAtt, self).__init__()
+    """Coordinate Attention，适配 YOLO 接口 (c1, c2, reduction)"""
+    def __init__(self, c1, c2=None, reduction=32):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        if c1 != c2:
+            self.channel_adjust = nn.Conv2d(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
         self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        mip = max(8, c2 // reduction)
 
-        mip = max(8, inp // reduction)
-
-        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(c2, mip, kernel_size=1, stride=1, padding=0)
         self.bn1 = nn.BatchNorm2d(mip)
         self.act = h_swish()
 
-        self.conv_h = nn.Conv2d(mip, inp, kernel_size=1, stride=1, padding=0)
-        self.conv_w = nn.Conv2d(mip, inp, kernel_size=1, stride=1, padding=0)
+        self.conv_h = nn.Conv2d(mip, c2, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, c2, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
-        identity = x
-
+        x = self.channel_adjust(x)
         n, c, h, w = x.size()
+
         x_h = self.pool_h(x)
         x_w = self.pool_w(x).permute(0, 1, 3, 2)
 
@@ -989,9 +996,67 @@ class CoordAtt(nn.Module):
         a_h = self.conv_h(x_h).sigmoid()
         a_w = self.conv_w(x_w).sigmoid()
 
-        out = identity * a_w * a_h
+        return x * a_w * a_h
 
-        return out
+
+class C2f_CoordAtt(nn.Module):
+    """标准 C2f + CoordAtt"""
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=32):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            Bottleneck(self.c, self.c, shortcut, g, e=1.0) for _ in range(n)
+        )
+        self.att = CoordAtt(c2, c2, reduction)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        return self.att(out)
+
+
+class NAM(nn.Module):
+    """Normalization-based Attention Module，适配 YOLO 接口"""
+    def __init__(self, c1, c2=None, reduction=16):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        if c1 != c2:
+            self.channel_adjust = nn.Conv2d(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+        self.bn = nn.BatchNorm2d(c2)
+        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+
+    def forward(self, x):
+        x = self.channel_adjust(x)
+        out = self.bn(x)
+        weights = torch.sigmoid(self.gamma * out)
+        return x * weights
+
+
+class C2f_NAM(nn.Module):
+    """标准 C2f + NAM"""
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=16):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            Bottleneck(self.c, self.c, shortcut, g, e=1.0) for _ in range(n)
+        )
+        self.att = NAM(c2, c2, reduction)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        out = self.cv2(torch.cat(y, 1))
+        return self.att(out)
 
 '''    
 class ContextAggregation(nn.Module):
@@ -2105,6 +2170,71 @@ class C2f_HighPerfGAM(nn.Module):
         )
         self.shortcut = shortcut
     
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+class HighPerfGAM_GlobalOnly(nn.Module):
+    """仅保留全局注意力分支（Performer），移除通道、局部和门控。"""
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        self.num_heads = num_heads
+        self.m_dim = m_dim
+
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
+        self.global_attention = PerformerAttention(c2, num_heads, m_dim)
+        self.norm = nn.LayerNorm(c2)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        identity = x
+        x = self.channel_adjust(x)
+        B, C, H, W = x.shape
+
+        x_reshaped = x.flatten(2).transpose(1, 2)
+        global_feat = self.global_attention(self.norm(x_reshaped))
+        global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        return identity + self.gamma * global_feat
+
+
+class HighPerfGAMBlock_GlobalOnly(nn.Module):
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM_GlobalOnly(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        self.shortcut = nn.Identity() if c1 == c2 else Conv(c1, c2, 1)
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class C2f_HighPerfGAM_GlobalOnly(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock_GlobalOnly(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
