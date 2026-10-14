@@ -2464,6 +2464,88 @@ class C2f_HighPerfGAM_NoLocal(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+class HighPerfGAM_EqualWeight(nn.Module):
+    """三个分支等权重融合，无动态门控"""
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.c1, self.c2 = c1, c2
+        self.reduction = reduction
+        self.num_heads = num_heads
+        self.m_dim = m_dim
+
+        if c1 != c2:
+            self.channel_adjust = Conv(c1, c2, 1)
+        else:
+            self.channel_adjust = nn.Identity()
+
+        self.global_attention = PerformerAttention(c2, num_heads, m_dim)
+        self.channel_attention = AdaptiveChannelAttention(c2, reduction)
+        self.local_refinement = LocalSpatialRefinement(c2)
+        self.norm = nn.LayerNorm(c2)
+
+        # 严格等权重融合：三个分支各占 1/3（固定，不可学习）
+        self.register_buffer('fusion_weights', torch.ones(3) / 3)
+
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, x):
+        identity = x
+        x = self.channel_adjust(x)
+        B, C, H, W = x.shape
+
+        # 全局分支
+        x_reshaped = x.flatten(2).transpose(1, 2)
+        global_feat = self.global_attention(self.norm(x_reshaped))
+        global_feat = global_feat.transpose(1, 2).reshape(B, C, H, W)
+
+        # 通道分支
+        channel_feat = self.channel_attention(x)
+
+        # 局部分支
+        local_feat = self.local_refinement(x)
+
+        # 固定等权重融合（1/3, 1/3, 1/3）
+        weights = self.fusion_weights
+        fused = weights[0] * global_feat + weights[1] * channel_feat + weights[2] * local_feat
+
+        if identity.shape[1] != self.c2:
+            identity = self.channel_adjust(identity)
+        return identity + self.gamma * fused
+
+
+class HighPerfGAMBlock_EqualWeight(nn.Module):
+    def __init__(self, c1, c2=None, reduction=8, num_heads=8, m_dim=64):
+        super().__init__()
+        c2 = c2 or c1
+        self.conv1 = Conv(c1, c2, 1)
+        self.attention = HighPerfGAM_EqualWeight(c2, c2, reduction, num_heads, m_dim)
+        self.conv2 = Conv(c2, c2, 1)
+        self.shortcut = nn.Identity() if c1 == c2 else Conv(c1, c2, 1)
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.attention(out)
+        out = self.conv2(out)
+        return out + identity
+
+
+class C2f_HighPerfGAM_EqualWeight(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5, reduction=8, num_heads=8):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(
+            HighPerfGAMBlock_EqualWeight(self.c, self.c, reduction, num_heads) for _ in range(n)
+        )
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 
 class ECAPlusPlus(nn.Module):
     def __init__(self, channels=None, gamma=2, b=1):
